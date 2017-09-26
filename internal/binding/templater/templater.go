@@ -1,72 +1,75 @@
 package templater
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/therecipe/qt/internal/binding/parser"
 	"github.com/therecipe/qt/internal/utils"
 )
 
-var Minimal bool
+func GenModule(m, target string, mode int) {
+	if !parser.ShouldBuildForTarget(m, target) {
+		utils.Log.WithField("module", m).Debug("skip generation")
+		return
+	}
+	utils.Log.WithField("module", m).Debug("generating")
 
-func GenModule(name string) {
-	if ShouldBuild(name) {
+	var suffix string
+	switch m {
+	case "AndroidExtras":
+		suffix = "_android"
 
-		var (
-			pkgName = strings.ToLower(name)
-			suffix  string
-		)
+	case "Sailfish":
+		suffix = "_sailfish"
+	}
 
-		if name == "AndroidExtras" {
-			suffix = "_android"
-		}
-		if name == "Sailfish" {
-			suffix = "_sailfish"
-		}
+	if mode == NONE {
+		utils.RemoveAll(utils.GoQtPkgPath(strings.ToLower(m)))
+		utils.MkdirAll(utils.GoQtPkgPath(strings.ToLower(m)))
+	}
 
-		//cleanup
-		if !Minimal {
-			utils.RemoveAll(utils.GetQtPkgPath(pkgName))
-			utils.RemoveAll(utils.GetQtPkgPath("internal", "binding", "dump", name))
-		}
-
-		//prepare
-		utils.MakeFolder(utils.GetQtPkgPath(pkgName))
-		CopyCgo(name)
-		if name == "AndroidExtras" && !Minimal {
-			utils.Save(utils.GetQtPkgPath(pkgName, "utils-androidextras_android.go"), utils.Load(utils.GetQtPkgPath("internal", "binding", "files", "utils-androidextras_android.go")))
-		}
-		manualWeakLink("Qt" + name)
-		for _, c := range parser.ClassMap {
-			if strings.TrimPrefix(c.Module, "Qt") == name {
-				addCallbackNameFunctions(c)
-			}
+	if mode == MINIMAL {
+		if suffix != "" {
+			return
 		}
 
-		//dry run
-		CppTemplate("Qt" + name)
-		GoTemplate("Qt"+name, false)
+		utils.SaveBytes(utils.GoQtPkgPath(strings.ToLower(m), strings.ToLower(m)+"-minimal.cpp"), CppTemplate(m, mode, target, ""))
+		utils.SaveBytes(utils.GoQtPkgPath(strings.ToLower(m), strings.ToLower(m)+"-minimal.h"), HTemplate(m, mode, ""))
+		utils.SaveBytes(utils.GoQtPkgPath(strings.ToLower(m), strings.ToLower(m)+"-minimal.go"), GoTemplate(m, false, mode, m, target, ""))
 
-		//generate
-		if Minimal {
-			if !(name == "AndroidExtras" || name == "Sailfish") {
-				utils.SaveBytes(utils.GetQtPkgPath(pkgName, pkgName+"-minimal"+suffix+".cpp"), CppTemplate("Qt"+name))
-				utils.SaveBytes(utils.GetQtPkgPath(pkgName, pkgName+"-minimal"+suffix+".h"), HTemplate("Qt"+name))
-			}
-		} else {
-			utils.SaveBytes(utils.GetQtPkgPath(pkgName, pkgName+suffix+".cpp"), CppTemplate("Qt"+name))
-			utils.SaveBytes(utils.GetQtPkgPath(pkgName, pkgName+suffix+".h"), HTemplate("Qt"+name))
+		if !UseStub(false, "Qt"+m, mode) {
+			CgoTemplate(m, "", target, mode, m, "")
 		}
 
-		if Minimal {
-			if !(name == "AndroidExtras" || name == "Sailfish") {
-				utils.SaveBytes(utils.GetQtPkgPath(pkgName, pkgName+"-minimal.go"), GoTemplate("Qt"+name, false))
-			}
-		} else {
-			if name == "AndroidExtras" || name == "Sailfish" {
-				utils.SaveBytes(utils.GetQtPkgPath(pkgName, pkgName+suffix+".go"), GoTemplate("Qt"+name, false))
-			}
-			utils.SaveBytes(utils.GetQtPkgPath(pkgName, pkgName+".go"), GoTemplate("Qt"+name, name == "AndroidExtras" || name == "Sailfish"))
+		return
+	}
+
+	if m == "AndroidExtras" {
+		utils.Save(utils.GoQtPkgPath(strings.ToLower(m), "utils-androidextras_android.go"), utils.Load(utils.GoQtPkgPath("internal", "binding", "files", "utils-androidextras_android.go")))
+	}
+
+	if !UseStub(false, "Qt"+m, mode) {
+		utils.SaveBytes(utils.GoQtPkgPath(strings.ToLower(m), strings.ToLower(m)+suffix+".cpp"), CppTemplate(m, mode, target, ""))
+		utils.SaveBytes(utils.GoQtPkgPath(strings.ToLower(m), strings.ToLower(m)+suffix+".h"), HTemplate(m, mode, ""))
+	}
+
+	//always generate full
+	if suffix != "" {
+		utils.SaveBytes(utils.GoQtPkgPath(strings.ToLower(m), strings.ToLower(m)+suffix+".go"), GoTemplate(m, false, mode, m, target, ""))
+	}
+
+	//may generate stub
+	utils.SaveBytes(utils.GoQtPkgPath(strings.ToLower(m), strings.ToLower(m)+".go"), GoTemplate(m, suffix != "", mode, m, target, ""))
+
+	if !UseStub(false, "Qt"+m, mode) {
+		CgoTemplate(m, "", target, mode, m, "")
+	}
+
+	if utils.QT_DOCKER() {
+		if idug, ok := os.LookupEnv("IDUG"); ok {
+			utils.RunCmd(exec.Command("chown", "-R", idug, utils.GoQtPkgPath(strings.ToLower(m))), "chown files to user")
 		}
 	}
 }

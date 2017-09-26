@@ -1,3 +1,5 @@
+//author: https://github.com/longlongh4
+
 package main
 
 import (
@@ -10,12 +12,11 @@ import (
 	"github.com/therecipe/qt/quick"
 )
 
-//go:generate qtmoc
 type QmlBridge struct {
 	core.QObject
 
-	_ func(data string)        `signal:sendToQml`
-	_ func(data string) string `slot:sendToGo`
+	_ func(data string)        `signal:"sendToQml"`
+	_ func(data string) string `slot:"sendToGo"`
 }
 
 func main() {
@@ -32,7 +33,7 @@ func main() {
 	})
 
 	view.RootContext().SetContextProperty("QmlBridge", qmlBridge)
-	view.SetSource(core.NewQUrl3("qrc:///qml/bridge2.qml", 0))
+	view.SetSource(core.NewQUrl3("qrc:/qml/bridge2.qml", 0))
 
 	go func() {
 		for t := range time.NewTicker(time.Second * 1).C {

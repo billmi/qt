@@ -2,6 +2,7 @@ package converter
 
 import (
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,7 +16,7 @@ func module(input interface{}) string {
 	switch input.(type) {
 	case *parser.Enum, *parser.Function:
 		{
-			return module(parser.ClassMap[class(input)].Module)
+			return module(parser.State.ClassMap[class(input)].Module)
 		}
 
 	case string:
@@ -53,53 +54,19 @@ func class(input interface{}) string {
 	return ""
 }
 
-func CleanValue(value string) string {
-	for _, b := range []string{"*", "const", "&amp", "&", ";"} {
-		value = strings.Replace(value, b, "", -1)
-	}
-	return strings.TrimSpace(value)
-}
-
-func cleanName(name, value string) string {
-	switch name {
-	case
-		"type",
-		"func",
-		"range",
-		"string",
-		"int",
-		"map",
-		"const",
-		"interface",
-		"select",
-		"strings",
-		"new",
-		"signal",
-		"ptr",
-		"register":
-		{
-			return name[:len(name)-2]
-		}
-
-	case "":
-		{
-			return "v" + strings.Replace(strings.ToLower(CleanValue(value)[:2]), ".", "", -1)
-		}
-	}
-
-	return name
-}
-
 func isClass(value string) bool {
 	if strings.Contains(value, ".") {
 		return isClass(strings.Split(value, ".")[1])
 	}
 
-	var _, exists = parser.ClassMap[value]
-	return exists
+	var _, ok = parser.State.ClassMap[value]
+	return ok
 }
 
 func isEnum(class, value string) bool {
+	if strings.ContainsAny(value, "<>") {
+		return false
+	}
 	if strings.Contains(value, "::") {
 		return true
 	}
@@ -111,7 +78,7 @@ func isEnum(class, value string) bool {
 func findEnum(className, value string, byValue bool) (string, string) {
 
 	//look in given class
-	if c, exists := parser.ClassMap[class(value)]; exists {
+	if c, ok := parser.State.ClassMap[class(value)]; ok {
 		for _, e := range c.Enums {
 			if outE, outT := findEnumH(e, value, byValue); outE != "" {
 				return outE, outT
@@ -120,7 +87,7 @@ func findEnum(className, value string, byValue bool) (string, string) {
 	}
 
 	//look in same class
-	if c, exists := parser.ClassMap[className]; exists {
+	if c, ok := parser.State.ClassMap[className]; ok {
 		for _, e := range c.Enums {
 			if outE, outT := findEnumH(e, value, byValue); outE != "" {
 				return outE, outT
@@ -129,24 +96,13 @@ func findEnum(className, value string, byValue bool) (string, string) {
 	}
 
 	//look in super classes
-	if c, exists := parser.ClassMap[className]; exists {
+	if c, ok := parser.State.ClassMap[className]; ok {
 		for _, s := range c.GetAllBases() {
-			if sc, exists := parser.ClassMap[s]; exists {
+			if sc, ok := parser.State.ClassMap[s]; ok {
 				for _, e := range sc.Enums {
 					if outE, outT := findEnumH(e, value, byValue); outE != "" {
 						return outE, outT
 					}
-				}
-			}
-		}
-	}
-
-	//look in namespaces
-	for m := range parser.SubnamespaceMap {
-		if c, exists := parser.ClassMap[m]; exists {
-			for _, e := range c.Enums {
-				if outE, outT := findEnumH(e, value, byValue); outE != "" {
-					return outE, outT
 				}
 			}
 		}
@@ -159,7 +115,7 @@ func findEnumH(e *parser.Enum, value string, byValue bool) (string, string) {
 
 	if byValue {
 		for _, v := range e.Values {
-			if outE, _ := findEnumHelper(value, class(e)+"::"+v.Name, ""); outE != "" {
+			if outE, _ := findEnumHelper(value, fmt.Sprintf("%v::%v", class(e), v.Name), ""); outE != "" {
 				return outE, ""
 			}
 		}
@@ -264,8 +220,12 @@ func cppEnumExact(value, outE, outT string) string {
 }
 
 func IsPrivateSignal(f *parser.Function) bool {
+	var fc, ok = f.Class()
+	if !ok {
+		return false
+	}
 
-	if parser.ClassMap[f.Class()].Module == "QtCore" {
+	if fc.Module == "QtCore" {
 
 		var (
 			fData string
@@ -280,43 +240,43 @@ func IsPrivateSignal(f *parser.Function) bool {
 		switch runtime.GOOS {
 		case "darwin":
 			{
-				fData = utils.Load(fmt.Sprintf("/usr/local/Qt5.7.0/5.7/clang_64/lib/%v.framework/Versions/5/Headers/%v", strings.Title(parser.ClassMap[f.Class()].DocModule), fPath))
+				if utils.QT_HOMEBREW() {
+					fData = utils.LoadOptional(filepath.Join(utils.QT_DARWIN_DIR(), "lib", fmt.Sprintf("%v.framework", strings.Title(parser.State.ClassMap[f.ClassName()].DocModule)), "Versions", "5", "Headers", fPath))
+				} else {
+					fData = utils.Load(filepath.Join(utils.QT_DARWIN_DIR(), "lib", fmt.Sprintf("%v.framework", strings.Title(parser.State.ClassMap[f.ClassName()].DocModule)), "Versions", "5", "Headers", fPath))
+				}
 			}
 
 		case "windows":
 			{
-				fData = utils.Load(fmt.Sprintf("C:\\Qt\\Qt5.7.0\\5.7\\mingw53_32\\include\\%v\\%v", strings.Title(parser.ClassMap[f.Class()].DocModule), fPath))
+				if utils.QT_MSYS2() {
+					fData = utils.LoadOptional(filepath.Join(utils.QT_MSYS2_DIR(), "include", strings.Title(parser.State.ClassMap[f.ClassName()].DocModule), fPath))
+				} else {
+					fData = utils.Load(filepath.Join(utils.QT_DIR(), utils.QT_VERSION_MAJOR(), "mingw53_32", "include", strings.Title(parser.State.ClassMap[f.ClassName()].DocModule), fPath))
+				}
 			}
 
 		case "linux":
 			{
-				switch runtime.GOARCH {
-				case "amd64":
-					{
-						fData = utils.Load(fmt.Sprintf("/usr/local/Qt5.7.0/5.7/gcc_64/include/%v/%v", strings.Title(parser.ClassMap[f.Class()].DocModule), fPath))
-					}
-
-				case "386":
-					{
-						fData = utils.Load(fmt.Sprintf("/usr/local/Qt5.7.0/5.7/gcc/include/%v/%v", strings.Title(parser.ClassMap[f.Class()].DocModule), fPath))
-					}
+				if utils.QT_PKG_CONFIG() {
+					fData = utils.LoadOptional(filepath.Join(strings.TrimSpace(utils.RunCmd(exec.Command("pkg-config", "--variable=includedir", "Qt5Core"), "convert.IsPrivateSignal_includeDir")), strings.Title(parser.State.ClassMap[f.ClassName()].DocModule), fPath))
+				} else {
+					fData = utils.Load(filepath.Join(utils.QT_DIR(), utils.QT_VERSION_MAJOR(), "gcc_64", "include", strings.Title(parser.State.ClassMap[f.ClassName()].DocModule), fPath))
 				}
 			}
 		}
 
 		if fData != "" {
-			if strings.Contains(fData, f.Name+"(") {
-
-				return strings.Contains(strings.Split(strings.Split(fData, f.Name+"(")[1], ")")[0], "QPrivateSignal")
+			if strings.Contains(fData, fmt.Sprintf("%v(", f.Name)) {
+				return strings.Contains(strings.Split(strings.Split(fData, fmt.Sprintf("%v(", f.Name))[1], ")")[0], "QPrivateSignal")
 			}
 
-			if strings.Contains(fData, f.Name+" (") {
-				return strings.Contains(strings.Split(strings.Split(fData, f.Name+" (")[1], ")")[0], "QPrivateSignal")
+			if strings.Contains(fData, fmt.Sprintf("%v (", f.Name)) {
+				return strings.Contains(strings.Split(strings.Split(fData, fmt.Sprintf("%v (", f.Name))[1], ")")[0], "QPrivateSignal")
 			}
-
 		}
 
-		fmt.Println("converter.IsPrivateSignal", f.Class())
+		utils.Log.Debugln("converter.IsPrivateSignal", f.ClassName())
 	}
 
 	return false

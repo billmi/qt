@@ -1,66 +1,129 @@
 package qt
 
 import (
+	"log"
+	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
-
-	_ "github.com/therecipe/qt/internal/android"
+	"unsafe"
 )
 
 var (
-	signals      = make(map[string]interface{})
+	Logger = log.New(os.Stderr, "", log.Ltime)
+
+	signals      = make(map[unsafe.Pointer]map[string]interface{})
+	signalsJNI   = make(map[string]map[string]interface{})
 	signalsMutex = new(sync.Mutex)
-	ids          int
+
+	objects      = make(map[unsafe.Pointer]interface{})
+	objectsMutex = new(sync.Mutex)
+
+	objectsTemp      = make(map[unsafe.Pointer]interface{})
+	objectsTempMutex = new(sync.Mutex)
 )
 
 func init() { runtime.LockOSThread() }
 
-func ConnectSignal(name, signal string, function interface{}) {
+func ExistsSignal(cPtr unsafe.Pointer, signal string) (exists bool) {
 	signalsMutex.Lock()
-	signals[name+":"+signal] = function
+	_, exists = signals[cPtr][signal]
 	signalsMutex.Unlock()
+	return
 }
 
-func GetSignal(name, signal string) interface{} {
-	if signal == "destroyed" || signal == "deleteLater" {
-		defer DisconnectAllSignals(name)
-	}
-	var s interface{}
+func LendSignal(cPtr unsafe.Pointer, signal string) (s interface{}) {
 	signalsMutex.Lock()
-	s = signals[name+":"+signal]
+	s = signals[cPtr][signal]
 	signalsMutex.Unlock()
-	return s
+	return
 }
 
-func DisconnectSignal(name, signal string) {
+func lendSignalJNI(cPtr, signal string) (s interface{}) {
 	signalsMutex.Lock()
-	delete(signals, name+":"+signal)
+	s = signalsJNI[cPtr][signal]
 	signalsMutex.Unlock()
+	return
 }
 
-func DisconnectAllSignals(name string) {
-	for entry := range signals {
-		if strings.Contains(entry, name) {
-			signalsMutex.Lock()
-			delete(signals, entry)
-			signalsMutex.Unlock()
+func GetSignal(cPtr interface{}, signal string) interface{} {
+	if dcPtr, ok := cPtr.(unsafe.Pointer); ok {
+		if signal == "destroyed" || strings.HasPrefix(signal, "~") {
+			defer DisconnectAllSignals(dcPtr, signal)
 		}
+		return LendSignal(dcPtr, signal)
+	}
+	return lendSignalJNI(cPtr.(string), signal)
+}
+
+func ConnectSignal(cPtr interface{}, signal string, function interface{}) {
+	if dcPtr, ok := cPtr.(unsafe.Pointer); ok {
+		signalsMutex.Lock()
+		if s, exists := signals[dcPtr]; !exists {
+			signals[dcPtr] = map[string]interface{}{signal: function}
+		} else {
+			s[signal] = function
+		}
+		signalsMutex.Unlock()
+	} else {
+		connectSignalJNI(cPtr.(string), signal, function)
 	}
 }
 
-func Identifier() string {
-	ids++
-	return strconv.Itoa(ids)
+func connectSignalJNI(cPtr, signal string, function interface{}) {
+	signalsMutex.Lock()
+	if s, exists := signalsJNI[cPtr]; !exists {
+		signalsJNI[cPtr] = map[string]interface{}{signal: function}
+	} else {
+		s[signal] = function
+	}
+	signalsMutex.Unlock()
+}
+
+func DisconnectSignal(cPtr interface{}, signal string) {
+	if dcPtr, ok := cPtr.(unsafe.Pointer); ok {
+		signalsMutex.Lock()
+		delete(signals[dcPtr], signal)
+		signalsMutex.Unlock()
+	} else {
+		disconnectSignalJNI(cPtr.(string), signal)
+	}
+}
+
+func disconnectSignalJNI(cPtr, signal string) {
+	signalsMutex.Lock()
+	delete(signalsJNI[cPtr], signal)
+	signalsMutex.Unlock()
+}
+
+func DisconnectAllSignals(cPtr unsafe.Pointer, signal string) {
+	signalsMutex.Lock()
+	if s, exists := signals[cPtr]["destroyed"]; signal != "destroyed" && exists {
+		signals[cPtr] = map[string]interface{}{"destroyed": s}
+	} else {
+		delete(signals, cPtr)
+	}
+	signalsMutex.Unlock()
+	if signal == "destroyed" {
+		Unregister(cPtr)
+	}
 }
 
 func DumpSignals() {
-	println("##############################\tDUMP_SIGNALTABLE_START\t##############################")
-	for entry := range signals {
-		println(entry)
+	Debug("##############################\tSIGNALSTABLE_START\t##############################")
+	signalsMutex.Lock()
+	for cPtr, entry := range signals {
+		Debug(cPtr, entry)
 	}
-	println("##############################\tDUMP_SIGNALTABLE_END\t##############################")
+	signalsMutex.Unlock()
+	Debug("##############################\tSIGNALSTABLE_END\t##############################")
+}
+
+func CountSignals() (c int) {
+	signalsMutex.Lock()
+	c = len(signals)
+	signalsMutex.Unlock()
+	return
 }
 
 func GoBoolToInt(b bool) int {
@@ -70,8 +133,58 @@ func GoBoolToInt(b bool) int {
 	return 0
 }
 
-func Recovering(fn string) {
+func Recover(fn string) {
 	if recover() != nil {
-		println("recovered in:", fn)
+		Debug("RECOVERED:", fn)
 	}
+}
+
+func Debug(fn ...interface{}) {
+	if strings.ToLower(os.Getenv("QT_DEBUG")) == "true" {
+		Logger.Println(fn...)
+	}
+}
+
+func ClearSignals() {
+	signalsMutex.Lock()
+	signals = make(map[unsafe.Pointer]map[string]interface{})
+	signalsMutex.Unlock()
+}
+
+func Register(cPtr unsafe.Pointer, gPtr interface{}) {
+	objectsMutex.Lock()
+	objects[cPtr] = gPtr
+	objectsMutex.Unlock()
+}
+
+func Receive(cPtr unsafe.Pointer) (o interface{}, ok bool) {
+	objectsMutex.Lock()
+	o, ok = objects[cPtr]
+	objectsMutex.Unlock()
+	return
+}
+
+func Unregister(cPtr unsafe.Pointer) {
+	objectsMutex.Lock()
+	delete(objects, cPtr)
+	objectsMutex.Unlock()
+}
+
+func RegisterTemp(cPtr unsafe.Pointer, gPtr interface{}) {
+	objectsTempMutex.Lock()
+	objectsTemp[cPtr] = gPtr
+	objectsTempMutex.Unlock()
+}
+
+func ReceiveTemp(cPtr unsafe.Pointer) (o interface{}, ok bool) {
+	objectsTempMutex.Lock()
+	o, ok = objectsTemp[cPtr]
+	objectsTempMutex.Unlock()
+	return
+}
+
+func UnregisterTemp(cPtr unsafe.Pointer) {
+	objectsTempMutex.Lock()
+	delete(objectsTemp, cPtr)
+	objectsTempMutex.Unlock()
 }

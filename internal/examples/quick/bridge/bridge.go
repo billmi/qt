@@ -32,8 +32,11 @@ func main() {
 	layout.AddWidget(newQmlWidget(), 0, 0)
 
 	var window = widgets.NewQMainWindow(nil, 0)
-	window.Layout().DestroyQObject()
-	window.SetLayout(layout)
+
+	var centralWidget = widgets.NewQWidget(window, 0)
+	centralWidget.SetLayout(layout)
+	window.SetCentralWidget(centralWidget)
+
 	window.Show()
 
 	widgets.QApplication_Exec()
@@ -54,7 +57,6 @@ func newCppWidget() *widgets.QWidget {
 	layout.AddWidget(manipulatedFromQml, 0, 0)
 
 	var widget = widgets.NewQWidget(nil, 0)
-	widget.Layout().DestroyQObject()
 	widget.SetLayout(layout)
 
 	return widget
@@ -73,7 +75,7 @@ func newQmlWidget() *quick.QQuickWidget {
 	initQmlContext(quickWidget)
 	initQmlBridge(quickWidget)
 
-	quickWidget.SetSource(core.NewQUrl3("qrc:///qml/bridge.qml", 0))
+	quickWidget.SetSource(core.NewQUrl3("qrc:/qml/bridge.qml", 0))
 
 	return quickWidget
 }
@@ -81,7 +83,7 @@ func newQmlWidget() *quick.QQuickWidget {
 func initQmlContext(quickWidget *quick.QQuickWidget) {
 
 	var m = map[string]map[string]string{
-		"QmlButton": map[string]string{
+		"QmlButton": {
 			"color":        "lightGray",
 			"pressedColor": "darkGray",
 			"text":         "Call Go Function",
@@ -95,15 +97,14 @@ func initQmlContext(quickWidget *quick.QQuickWidget) {
 	quickWidget.RootContext().SetContextProperty2("qmlInitContext", core.NewQVariant14(string(b)))
 }
 
-//go:generate qtmoc
 type QmlBridge struct {
 	core.QObject
 
-	_ func(source, action, data string) `signal:sendToQml`
-	_ func(source, action, data string) `slot:sendToGo`
+	_ func(source, action, data string) `signal:"sendToQml"`
+	_ func(source, action, data string) `slot:"sendToGo"`
 
-	_ func(object *core.QObject) `slot:registerToGo`
-	_ func(objectName string)    `slot:deregisterToGo`
+	_ func(object *core.QObject) `slot:"registerToGo"`
+	_ func(objectName string)    `slot:"deregisterToGo"`
 }
 
 func initQmlBridge(quickWidget *quick.QQuickWidget) {

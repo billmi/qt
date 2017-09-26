@@ -1,154 +1,94 @@
 package parser
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/therecipe/qt/internal/utils"
+)
 
 type Module struct {
 	Namespace *Namespace `xml:"namespace"`
 	Project   string     `xml:"project,attr"`
+	Pkg       string
 }
 
 type Namespace struct {
 	Classes []*Class `xml:"class"`
-	//Functions    []*Function   `xml:"function"`
-	SubNamespace *SubNamespace `xml:"namespace"`
+	//Functions     []*Function     `xml:"function"` //TODO: uncomment
+	//Enums         []*Enum         `xml:"enum"`     //TODO: uncomment
+	SubNamespaces []*SubNamespace `xml:"namespace"`
 }
 
 type SubNamespace struct {
-	//Classes   []*Class    `xml:"class"`
-	//Functions []*Function `xml:"function"`
-	Enums []*Enum `xml:"enum"`
+	//Classes   []*Class    `xml:"class"`    //TODO: uncomment
+	Functions []*Function `xml:"function"`
+	Enums     []*Enum     `xml:"enum"`
+	Status    string      `xml:"status,attr"`
+	Access    string      `xml:"access,attr"`
 }
 
-func (m *Module) Prepare() {
+func (m *Module) Prepare() error {
+	utils.Log.WithField("module", strings.TrimPrefix(m.Project, "Qt")).Debug("prepare")
 
-	//register namespace
+	//register classes from namespace
 	for _, c := range m.Namespace.Classes {
-		c.register(m.Project)
-		for _, v := range c.Variables {
-			if !c.hasFunctionWithName(v.Name) {
-				c.Functions = append(c.Functions, v.toFunction(GETTER))
-				if !strings.Contains(v.Output, "const") {
-					c.Functions = append(c.Functions, v.toFunction(SETTER))
+		c.register(m)
+	}
+
+	//register enums and functions from subnamespaces
+	for _, sns := range m.Namespace.SubNamespaces {
+		for _, e := range sns.Enums {
+			if !(e.Status == "active") || !(e.Access == "public" || e.Access == "protected") ||
+				strings.Contains(e.Fullname, "Private") || strings.Contains(e.Fullname, "Util") ||
+				strings.Contains(e.Fullname, "nternal") || strings.ToLower(e.Name) == e.Name {
+				continue
+			}
+			e.register(m.Project)
+		}
+		if m.Project != "QtSensors" && m.Project != "QtXmlPatterns" &&
+			m.Project != "QtQml" && m.Project != "QtWidgets" && m.Project != "QtMacExtras" &&
+			m.Project != "QtTestLib" && m.Project != "QtScript" && m.Project != "QtQuick" {
+			for _, f := range sns.Functions {
+
+				if !(f.Status == "active") || !(f.Access == "public" || f.Access == "protected") ||
+					strings.Contains(f.Fullname, "Private") || strings.Contains(f.Fullname, "Util") ||
+					strings.Contains(f.Fullname, "nternal") || f.Name == "qDefaultSurfaceFormat" ||
+					f.ClassName() == "QUnicodeTables" ||
+					f.ClassName() == "QUtf8Functions" ||
+					f.ClassName() == "QUnicodeTools" ||
+					f.ClassName() == "HPack" ||
+					f.ClassName() == "QHighDpi" ||
+					f.ClassName() == "QPdf" ||
+					f.ClassName() == "QPlatformGraphicsBufferHelper" ||
+					f.ClassName() == "QIcu" ||
+					strings.ToLower(f.ClassName()) == f.ClassName() {
+					continue
 				}
+
+				if m.Project == "QtWebEngine" && f.Name != "initialize" {
+					continue
+				}
+
+				f.Static = true
+				f.register(m.Project)
 			}
 		}
 	}
 
-	//register subnamespace
-	if m.Project == "QtCore" || m.Project == "QtMultimedia" {
-		if m.Namespace.SubNamespace != nil {
-			for _, e := range m.Namespace.SubNamespace.Enums {
-				e.register(m.Project)
-			}
-		}
+	//mutate classmap
+	m.remove()
+
+	//mutate classes
+	for _, c := range SortedClassesForModule(m.Project, false) {
+		c.add()
+		c.fix()
+		c.remove()
 	}
 
-	//remove obsolete and private
-	m.removeClasses()
-	for _, c := range ClassMap {
-		if c.Module == m.Project {
-			c.fix()
-			c.removeFunctions()
-			c.removeEnums()
-		}
+	//register derivations
+	for _, c := range m.Namespace.Classes {
+		c.derivation()
 	}
 
-	for _, c := range ClassMap {
-		if c.Module == m.Project {
-			c.fixBases()
-
-			for _, f := range c.Functions {
-				f.fix()
-				f.fixOverload()
-
-				if f.Virtual == "virtual" {
-					f.Virtual = IMPURE
-				}
-				if f.Meta == COPY_CONSTRUCTOR || f.Meta == MOVE_CONSTRUCTOR {
-					f.Meta = CONSTRUCTOR
-				}
-			}
-		}
-	}
-}
-
-func (m *Module) removeClasses() {
-	for _, c := range ClassMap {
-		if (c.Status == "obsolete" || c.Status == "compat") || !(c.Access == "public" || c.Access == "protected") || c.Name == "qoutputrange" {
-			delete(ClassMap, c.Name)
-		}
-	}
-}
-
-func sailfishModule() *Module {
-	//TODO: should be in Namespace.Functions
-	return &Module{Project: "QtSailfish", Namespace: &Namespace{Classes: []*Class{&Class{
-		Name:   "SailfishApp",
-		Access: "public",
-		Module: "QtSailfish",
-		Functions: []*Function{
-			&Function{
-				Name:      "application",
-				Fullname:  "SailfishApp::application",
-				Access:    "public",
-				Virtual:   "non",
-				Meta:      PLAIN,
-				Static:    true,
-				Output:    "QGuiApplication*",
-				Signature: "()",
-				Parameters: []*Parameter{
-					&Parameter{
-						Name:  "argc",
-						Value: "int &",
-					},
-					&Parameter{
-						Name:  "argv",
-						Value: "char **",
-					},
-				}},
-			&Function{
-				Name:      "main",
-				Fullname:  "SailfishApp::main",
-				Access:    "public",
-				Virtual:   "non",
-				Meta:      PLAIN,
-				Static:    true,
-				Output:    "int",
-				Signature: "()",
-				Parameters: []*Parameter{
-					&Parameter{
-						Name:  "argc",
-						Value: "int &",
-					},
-					&Parameter{
-						Name:  "argv",
-						Value: "char **",
-					},
-				}},
-			&Function{
-				Name:      "createView",
-				Fullname:  "SailfishApp::createView",
-				Access:    "public",
-				Virtual:   "non",
-				Meta:      PLAIN,
-				Static:    true,
-				Output:    "QQuickView*",
-				Signature: "()",
-			},
-			&Function{
-				Name:      "pathTo",
-				Fullname:  "SailfishApp::pathTo",
-				Access:    "public",
-				Virtual:   "non",
-				Meta:      PLAIN,
-				Static:    true,
-				Output:    "QUrl",
-				Signature: "pathTo(const QString &filename)",
-				Parameters: []*Parameter{
-					&Parameter{
-						Name:  "filename",
-						Value: "QString &",
-					},
-				}},
-		}}}}}
+	return nil
 }

@@ -1,9 +1,7 @@
-// +build !sailfish
+// +build !sailfish,!sailfish_emulator
 
 package sailfish
 
-//#include "sailfish_sailfish.h"
-import "C"
 import (
 	"github.com/therecipe/qt/core"
 	"github.com/therecipe/qt/gui"
@@ -19,20 +17,20 @@ type SailfishApp_ITF interface {
 	SailfishApp_PTR() *SailfishApp
 }
 
-func (p *SailfishApp) SailfishApp_PTR() *SailfishApp {
-	return p
+func (ptr *SailfishApp) SailfishApp_PTR() *SailfishApp {
+	return ptr
 }
 
-func (p *SailfishApp) Pointer() unsafe.Pointer {
-	if p != nil {
-		return p.ptr
+func (ptr *SailfishApp) Pointer() unsafe.Pointer {
+	if ptr != nil {
+		return ptr.ptr
 	}
 	return nil
 }
 
-func (p *SailfishApp) SetPointer(ptr unsafe.Pointer) {
-	if p != nil {
-		p.ptr = ptr
+func (ptr *SailfishApp) SetPointer(p unsafe.Pointer) {
+	if ptr != nil {
+		ptr.ptr = p
 	}
 }
 
@@ -49,10 +47,7 @@ func NewSailfishAppFromPointer(ptr unsafe.Pointer) *SailfishApp {
 	return n
 }
 
-func newSailfishAppFromPointer(ptr unsafe.Pointer) *SailfishApp {
-	var n = NewSailfishAppFromPointer(ptr)
-	return n
-}
+func (ptr *SailfishApp) DestroySailfishApp() {}
 
 func SailfishApp_Application(argc int, argv []string) *gui.QGuiApplication {
 

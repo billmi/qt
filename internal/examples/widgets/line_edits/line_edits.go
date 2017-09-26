@@ -15,7 +15,7 @@ func main() {
 
 	var (
 		echoGroup    = widgets.NewQGroupBox2("Echo", nil)
-		echoLabel    = widgets.NewQLabel2("Mode", nil, 0)
+		echoLabel    = widgets.NewQLabel2("Mode:", nil, 0)
 		echoComboBox = widgets.NewQComboBox(nil)
 		echoLineEdit = widgets.NewQLineEdit(nil)
 	)
@@ -102,10 +102,11 @@ func main() {
 	layout.AddWidget(accessGroup, 1, 1, 0)
 
 	var window = widgets.NewQMainWindow(nil, 0)
-	window.Layout().DestroyQObject()
-	window.SetLayout(layout)
-
 	window.SetWindowTitle("Line Edits")
+
+	var centralWidget = widgets.NewQWidget(window, 0)
+	centralWidget.SetLayout(layout)
+	window.SetCentralWidget(centralWidget)
 
 	window.Show()
 
@@ -150,7 +151,7 @@ func validatorChanged(validatorLineEdit *widgets.QLineEdit, index int) {
 
 	case 2:
 		{
-			validatorLineEdit.SetValidator(gui.NewQDoubleValidator(validatorLineEdit)) //TODO: gui.NewQDoubleValidator2(-999.0, 999.0, 2, validatorLineEdit)
+			validatorLineEdit.SetValidator(gui.NewQDoubleValidator2(-999.0, 999.0, 2, validatorLineEdit))
 		}
 	}
 

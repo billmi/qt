@@ -2,6 +2,8 @@ package templater
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -11,7 +13,7 @@ import (
 
 func cppFunctionCallback(function *parser.Function) string {
 	var output = fmt.Sprintf("%v { %v };", cppFunctionCallbackHeader(function), cppFunctionCallbackBody(function))
-	if functionIsSupported(parser.ClassMap[function.Class()], function) {
+	if function.IsSupported() {
 		return cppFunctionCallbackWithGuards(function, output)
 	}
 	return ""
@@ -39,11 +41,23 @@ func cppFunctionCallbackWithGuards(function *parser.Function, output string) str
 func cppFunctionCallbackHeader(function *parser.Function) string {
 	return fmt.Sprintf("%v %v%v(%v)%v",
 
-		function.Output,
+		func() string {
+			var c, _ = function.Class()
+			if parser.IsPackedMap(function.Output) && c.Module == parser.MOC && function.IsMocFunction {
+				var tHash = sha1.New()
+				tHash.Write([]byte(function.Output))
+				return fmt.Sprintf("type%v", hex.EncodeToString(tHash.Sum(nil)[:3]))
+			}
+			return function.Output
+		}(),
 
 		func() string {
 			if function.Meta == parser.SIGNAL {
 				return fmt.Sprintf("Signal_%v", strings.Title(function.Name))
+			}
+			var c, _ = function.Class()
+			if strings.HasPrefix(function.Name, parser.TILDE) && c.Module != parser.MOC {
+				return strings.Replace(function.Name, parser.TILDE, fmt.Sprintf("%vMy", parser.TILDE), -1)
 			}
 			return function.Name
 		}(),
@@ -67,7 +81,9 @@ func cppFunctionCallbackHeader(function *parser.Function) string {
 }
 
 func cppFunctionCallbackBody(function *parser.Function) string {
-	return fmt.Sprintf("%v%v;",
+	return fmt.Sprintf("%v%v%v;",
+
+		converter.CppInputParametersForCallbackBodyPrePack(function),
 
 		func() string {
 			if converter.CppHeaderOutput(function) != parser.VOID {
@@ -77,7 +93,7 @@ func cppFunctionCallbackBody(function *parser.Function) string {
 		}(),
 
 		func() string {
-			var output = fmt.Sprintf("callback%v_%v%v(%v)", function.Class(), strings.Title(function.Name), function.OverloadNumber, converter.CppInputParametersForCallbackBody(function))
+			var output = fmt.Sprintf("callback%v_%v%v(%v)", function.ClassName(), strings.Replace(strings.Title(function.Name), parser.TILDE, "Destroy", -1), function.OverloadNumber, converter.CppInputParametersForCallbackBody(function))
 
 			if converter.CppHeaderOutput(function) != parser.VOID {
 				output = converter.CppInput(output, function.Output, function)
@@ -89,32 +105,43 @@ func cppFunctionCallbackBody(function *parser.Function) string {
 }
 
 func cppFunction(function *parser.Function) string {
-	var output = fmt.Sprintf("%v\n{\n%v\n}", cppFunctionHeader(function), cppFunctionBodyWithGuards(function))
-	if functionIsSupported(nil, function) {
+	var output = fmt.Sprintf("%v\n{\n%v\n}", cppFunctionHeader(function), cppFunctionUnused(function, cppFunctionBodyWithGuards(function)))
+	if function.IsSupported() {
 		return output
 	}
 	return ""
 }
 
 func cppFunctionHeader(function *parser.Function) string {
-	var output = fmt.Sprintf("%v %v%v(%v)",
-		converter.CppHeaderOutput(function),
-
-		converter.CppHeaderName(function),
-
-		func() string {
-			if function.Default {
-				return "Default"
-			}
-			return ""
-		}(),
-
-		converter.CppHeaderInput(function))
-
-	if functionIsSupported(nil, function) {
+	var output = fmt.Sprintf("%v %v(%v)", converter.CppHeaderOutput(function), converter.CppHeaderName(function), converter.CppHeaderInput(function))
+	if function.IsSupported() {
 		return output
 	}
 	return ""
+}
+
+//TODO:
+func cppFunctionUnused(function *parser.Function, body string) string {
+
+	var tmp = make([]string, 0)
+	if !(function.Static || function.Meta == parser.CONSTRUCTOR) {
+		tmp = append(tmp, "ptr")
+	}
+	if function.Meta != parser.SIGNAL {
+		for _, p := range function.Parameters {
+			tmp = append(tmp, parser.CleanName(p.Name, p.Value))
+		}
+	}
+
+	bb := new(bytes.Buffer)
+	defer bb.Reset()
+	for _, p := range tmp {
+		if !strings.Contains(body, p) {
+			fmt.Fprintf(bb, "\tQ_UNUSED(%v);\n", p)
+		}
+	}
+	bb.WriteString(body)
+	return bb.String()
 }
 
 func cppFunctionBodyWithGuards(function *parser.Function) string {
@@ -122,7 +149,7 @@ func cppFunctionBodyWithGuards(function *parser.Function) string {
 	if function.Default {
 		switch {
 		case
-			strings.HasPrefix(function.Class(), "QMac") && !strings.HasPrefix(parser.ClassMap[function.Class()].Module, "QMac"):
+			strings.HasPrefix(function.ClassName(), "QMac") && !strings.HasPrefix(parser.State.ClassMap[function.ClassName()].Module, "QtMac"):
 			{
 				return fmt.Sprintf("#ifdef Q_OS_OSX\n%v%v\n#endif", cppFunctionBody(function), cppFunctionBodyFailed(function))
 			}
@@ -140,6 +167,12 @@ func cppFunctionBodyWithGuards(function *parser.Function) string {
 			function.Fullname == "QAbstractEventDispatcher::registerEventNotifier", function.Fullname == "QAbstractEventDispatcher::unregisterEventNotifier":
 			{
 				return fmt.Sprintf("#ifdef Q_OS_WIN\n%v%v\n#endif", cppFunctionBody(function), cppFunctionBodyFailed(function))
+			}
+
+		case
+			function.Fullname == "QScreen::model":
+			{
+				return fmt.Sprintf("#ifndef Q_OS_WIN\n%v\n#endif", cppFunctionBody(function))
 			}
 
 		case
@@ -166,6 +199,11 @@ func cppFunctionBodyWithGuards(function *parser.Function) string {
 			{
 				return fmt.Sprintf("#ifndef Q_OS_IOS\n%v%v\n#endif", cppFunctionBody(function), cppFunctionBodyFailed(function))
 			}
+
+		case function.Name == "qmlRegisterType" && function.TemplateModeGo != "":
+			{
+				return fmt.Sprintf("#ifdef QT_QML_LIB\n%v%v\n#endif", cppFunctionBody(function), cppFunctionBodyFailed(function))
+			}
 		}
 	}
 
@@ -181,40 +219,148 @@ func cppFunctionBodyFailed(function *parser.Function) string {
 
 func cppFunctionBody(function *parser.Function) string {
 
-	if function.Name == "objectNameAbs" || function.Name == "setObjectNameAbs" {
-		return fmt.Sprintf("\tif (dynamic_cast<My%v*>(static_cast<%v*>(ptr))) {\n\t\t%v%v;\n\t}%v",
+	var polyinputs, polyName = function.PossiblePolymorphicDerivations(false)
 
-			function.Class(), function.Class(),
+	var polyinputsSelf []string
 
-			func() string {
-				if function.Name == "objectNameAbs" {
-					return "return "
-				}
-				return ""
-			}(),
-
-			converter.CppOutputParameters(function, fmt.Sprintf("static_cast<My%v*>(ptr)->%v%v(%v)", function.Class(), function.Name, converter.CppOutputParametersDeducedFromGeneric(function), converter.CppInputParameters(function))),
-
-			func() string {
-				if function.Name == "objectNameAbs" {
-					return fmt.Sprintf("\n\treturn QString(\"%v_BASE\").toUtf8().data();", function.Class())
-				}
-				return ""
-			}(),
-		)
+	var c, _ = function.Class()
+	if function.Default && c.Module != parser.MOC {
+		polyinputsSelf, _ = function.PossibleDerivationsReversedAndRemovedPure(true)
+	} else {
+		polyinputsSelf, _ = function.PossiblePolymorphicDerivations(true)
 	}
+
+	if c.Module == parser.MOC {
+		var fc, ok = function.Class()
+		if !ok {
+			return ""
+		}
+
+		for _, bcn := range append([]string{function.ClassName()}, fc.GetBases()...) {
+			var bc, ok = parser.State.ClassMap[bcn]
+			if !ok {
+				continue
+			}
+			var f = *function
+			f.Fullname = fmt.Sprintf("%v::%v", bcn, f.Name)
+
+			var ff = bc.GetFunction(f.Name)
+			for _, fb := range parser.IsBlockedDefault() {
+				if f.Fullname == fb || (ff != nil && ff.Virtual == parser.PURE && (bc.Module != parser.MOC && bc.Pkg == "")) {
+					return ""
+				}
+			}
+		}
+	}
+
+	if (len(polyinputsSelf) == 0 && len(polyinputs) == 0) ||
+		function.SignalMode == parser.CONNECT || function.SignalMode == parser.DISCONNECT ||
+		(len(polyinputsSelf) != 0 && function.Meta == parser.CONSTRUCTOR) || (function.Meta == parser.DESTRUCTOR || strings.HasPrefix(function.Name, parser.TILDE)) {
+		return cppFunctionBodyInternal(function)
+	}
+
+	var bb = new(bytes.Buffer)
+	defer bb.Reset()
+
+	bb.WriteString("\t")
+
+	var deduce = func(input []string, polyName string, inner bool, body string) string {
+		var bb = new(bytes.Buffer)
+		defer bb.Reset()
+		for _, polyType := range input {
+			if polyType == "QObject" || polyType == input[len(input)-1] {
+				continue
+			}
+
+			if strings.HasPrefix(polyType, "QMac") {
+				fmt.Fprint(bb, "\n\t#ifdef Q_OS_OSX\n\t\t")
+			}
+
+			base := input[len(input)-1]
+			if parser.State.ClassMap[polyType].IsSubClassOfQObject() {
+				base = "QObject"
+			}
+
+			fmt.Fprintf(bb, "if (dynamic_cast<%v*>(static_cast<%v*>(%v))) {\n", polyType, base, polyName)
+
+			if strings.HasPrefix(polyType, "QMac") {
+				fmt.Fprint(bb, "\t#else\n\t\tif (false) {\n\t#endif\n")
+			}
+
+			fmt.Fprintf(bb, "\t%v\n", func() string {
+				var ibody string
+				if function.Default && polyName == "ptr" {
+					ibody = strings.Replace(body, "static_cast<"+input[len(input)-1]+"*>("+polyName+")->"+input[len(input)-1]+"::", "static_cast<"+polyType+"*>("+polyName+")->"+polyType+"::", -1)
+				} else {
+					ibody = strings.Replace(body, "static_cast<"+input[len(input)-1]+"*>("+polyName+")", "static_cast<"+polyType+"*>("+polyName+")", -1)
+				}
+
+				if strings.HasPrefix(polyType, "QMac") {
+					ibody = fmt.Sprintf("#ifdef Q_OS_OSX\n\t%v\n\t#endif", ibody)
+				}
+
+				if inner {
+					return ibody
+				}
+				if strings.Count(ibody, "\n") > 1 {
+					return "\t" + strings.Replace(ibody, "\n", "\n\t", -1)
+				}
+				return ibody
+			}())
+			fmt.Fprint(bb, "\t} else ")
+		}
+
+		if len(input) > 0 {
+			var _, ok = parser.State.ClassMap[input[len(input)-1]]
+			if ok {
+				var f = *function
+				f.Fullname = fmt.Sprintf("%v::%v", input[len(input)-1], f.Name)
+
+				for _, fb := range parser.IsBlockedDefault() {
+					if f.Fullname == fb {
+						body = ""
+					}
+				}
+			}
+		}
+
+		if bb.String() == "" {
+			return body
+		}
+		fmt.Fprintf(bb, "{\n\t%v\n\t}", func() string {
+			if strings.Count(body, "\n") > 1 {
+				return "\t" + strings.Replace(body, "\n", "\n\t", -1)
+			}
+			return body
+		}())
+		return bb.String()
+	}
+
+	if function.Static {
+		fmt.Fprint(bb, deduce(polyinputs, polyName, true, cppFunctionBodyInternal(function)))
+	} else if function.Meta == parser.GETTER || function.Meta == parser.SETTER || function.Meta == parser.SLOT {
+		fmt.Fprint(bb, deduce(polyinputsSelf, "ptr", false, cppFunctionBodyInternal(function)))
+	} else {
+		fmt.Fprint(bb, deduce(polyinputsSelf, "ptr", false, deduce(polyinputs, polyName, true, cppFunctionBodyInternal(function))))
+	}
+
+	return bb.String()
+}
+
+func cppFunctionBodyInternal(function *parser.Function) string {
 
 	switch function.Meta {
 	case parser.CONSTRUCTOR:
 		{
 			return fmt.Sprintf("%v\treturn new %v%v(%v);",
 				func() string {
-					if function.Name == "QCoreApplication" || function.Name == "QGuiApplication" || function.Name == "QApplication" {
-						return `	QList<QByteArray> aList = QByteArray(argv).split('|');
-	char *argvs[argc];
-	static int argcs = argc;
-	for (int i = 0; i < argc; i++)
-		argvs[i] = aList[i].data();
+					if parser.State.ClassMap[function.ClassName()].IsSubClassOf("QCoreApplication") {
+						return `	static int argcs = argc;
+	static char** argvs = static_cast<char**>(malloc(argcs * sizeof(char*)));
+
+	QList<QByteArray> aList = QByteArray(argv).split('|');
+	for (int i = 0; i < argcs; i++)
+		argvs[i] = (new QByteArray(aList.at(i)))->data();
 
 `
 					}
@@ -222,16 +368,21 @@ func cppFunctionBody(function *parser.Function) string {
 				}(),
 
 				func() string {
-					var class = parser.ClassMap[function.Class()]
+					var class, _ = function.Class()
 					if class.Module != parser.MOC {
-						if needsCallbackFunctions(class) {
+						if class.HasCallbackFunctions() {
 							return "My"
 						}
 					}
 					return ""
 				}(),
 
-				function.Class(),
+				func() string {
+					if c := parser.State.ClassMap[function.ClassName()]; c != nil && c.Fullname != "" {
+						return c.Fullname
+					}
+					return function.ClassName()
+				}(),
 
 				converter.CppInputParameters(function),
 			)
@@ -245,11 +396,15 @@ func cppFunctionBody(function *parser.Function) string {
 			)
 			defer bb.Reset()
 
+			if reg := converter.CppRegisterMetaType(function); reg != "" {
+				bb.WriteString(reg + "\n")
+			}
+
 			fmt.Fprint(bb, "\t")
 
 			if converter.CppHeaderOutput(function) != parser.VOID {
 				functionOutputType = converter.CppInputParametersForSlotArguments(function, &parser.Parameter{Name: "returnArg", Value: function.Output})
-				if function.Output != "void*" && !parser.ClassMap[strings.TrimSuffix(functionOutputType, "*")].IsQObjectSubClass() {
+				if function.Output != "void*" && !parser.State.ClassMap[strings.TrimSuffix(functionOutputType, "*")].IsSubClassOfQObject() {
 					functionOutputType = strings.TrimSuffix(functionOutputType, "*")
 				}
 				fmt.Fprintf(bb, "%v returnArg;\n\t", functionOutputType)
@@ -257,12 +412,19 @@ func cppFunctionBody(function *parser.Function) string {
 
 			fmt.Fprintf(bb, "QMetaObject::invokeMethod(static_cast<%v*>(ptr), \"%v\"%v%v);",
 
-				function.Class(),
+				function.ClassName(),
 
 				function.Name,
 
 				func() string {
 					if converter.CppHeaderOutput(function) != parser.VOID {
+
+						if c, _ := function.Class(); c.Module == parser.MOC && parser.IsPackedMap(function.Output) && function.IsMocFunction {
+							var tHash = sha1.New()
+							tHash.Write([]byte(function.Output))
+							return fmt.Sprintf(", Q_RETURN_ARG(%v, returnArg)", strings.Replace(functionOutputType, parser.CleanValue(function.Output), fmt.Sprintf("type%v", hex.EncodeToString(tHash.Sum(nil)[:3])), -1))
+						}
+
 						return fmt.Sprintf(", Q_RETURN_ARG(%v, returnArg)", functionOutputType)
 					}
 					return ""
@@ -280,12 +442,17 @@ func cppFunctionBody(function *parser.Function) string {
 
 	case parser.PLAIN, parser.DESTRUCTOR:
 		{
+			if (function.Meta == parser.DESTRUCTOR || strings.HasPrefix(function.Name, parser.TILDE)) && function.Default {
+				return ""
+			}
+
 			if function.Fullname == "SailfishApp::application" || function.Fullname == "SailfishApp::main" {
-				return fmt.Sprintf(`	QList<QByteArray> aList = QByteArray(argv).split('|');
-	char *argvs[argc];
-	static int argcs = argc;
-	for (int i = 0; i < argc; i++)
-	argvs[i] = aList[i].data();
+				return fmt.Sprintf(`	static int argcs = argc;
+	static char** argvs = static_cast<char**>(malloc(argcs * sizeof(char*)));
+
+	QList<QByteArray> aList = QByteArray(argv).split('|');
+	for (int i = 0; i < argcs; i++)
+		argvs[i] = (new QByteArray(aList.at(i)))->data();
 
 	return %v(%v);`,
 
@@ -304,27 +471,72 @@ func cppFunctionBody(function *parser.Function) string {
 					return ""
 				}(),
 
-				converter.CppOutputParameters(function, fmt.Sprintf("%v%v%v(%v)",
+				converter.CppOutputParameters(function, fmt.Sprintf("%v%v%v(%v)%v",
 
 					func() string {
-						if function.Static {
-							return fmt.Sprintf("%v::", function.Class())
+						var c, _ = function.Class()
+						//TODO:
+						if c.Name == "QAndroidJniEnvironment" && function.Meta == parser.PLAIN && strings.HasPrefix(function.Name, "Exception") {
+							return "({ QAndroidJniEnvironment env; env->"
 						}
-						return fmt.Sprintf("static_cast<%v*>(ptr)->", function.Class())
+						if function.NonMember {
+							return ""
+						}
+						if function.Static {
+							return fmt.Sprintf("%v::", function.ClassName())
+						}
+						return fmt.Sprintf("static_cast<%v*>(ptr)->",
+							func() string {
+								if c.Fullname != "" {
+									return c.Fullname
+								}
+								if strings.HasSuffix(function.Name, "_atList") {
+									if function.IsMap {
+										return fmt.Sprintf("%v<%v,%v>", parser.CleanValue(function.Container), function.Parameters[0].Value, strings.TrimPrefix(function.Output, "const "))
+									}
+									return fmt.Sprintf("%v<%v>", parser.CleanValue(function.Container), strings.TrimPrefix(function.Output, "const "))
+								}
+								if strings.HasSuffix(function.Name, "_setList") {
+									if len(function.Parameters) == 2 {
+										return fmt.Sprintf("%v<%v,%v>", parser.CleanValue(function.Container), function.Parameters[0].Value, strings.TrimPrefix(function.Parameters[1].Value, "const "))
+									}
+									return fmt.Sprintf("%v<%v>", parser.CleanValue(function.Container), strings.TrimPrefix(function.Parameters[0].Value, "const "))
+								}
+								if strings.HasSuffix(function.Name, "_newList") {
+									//will be overriden
+								}
+								if strings.HasSuffix(function.Name, "_keyList") {
+									//will be overriden
+								}
+								return function.ClassName()
+							}(),
+						)
 					}(),
 
 					func() string {
 						if function.Default {
-							if parser.ClassMap[function.Class()].Module == parser.MOC {
-								return fmt.Sprintf("%v::%v", parser.ClassMap[function.Class()].GetBases()[0], function.Name)
+							var c, _ = function.Class()
+							if c.Module == parser.MOC {
+								if function.IsMocProperty {
+									return fmt.Sprintf("%vDefault", function.Name)
+								}
+								return fmt.Sprintf("%v::%v", parser.State.ClassMap[function.ClassName()].GetBases()[0], function.Name)
 							} else {
-								return fmt.Sprintf("%v::%v", function.Class(), function.Name)
+								return fmt.Sprintf("%v::%v", function.ClassName(), function.Name)
 							}
 						}
 						return function.Name
 					}(),
 
-					converter.CppOutputParametersDeducedFromGeneric(function), converter.CppInputParameters(function))))
+					converter.CppOutputParametersDeducedFromGeneric(function), converter.CppInputParameters(function),
+					//TODO:
+					func() string {
+						var c, _ = function.Class()
+						if c.Name == "QAndroidJniEnvironment" && function.Meta == parser.PLAIN && strings.HasPrefix(function.Name, "Exception") {
+							return "; })"
+						}
+						return ""
+					}())))
 		}
 
 	case parser.GETTER:
@@ -334,7 +546,12 @@ func cppFunctionBody(function *parser.Function) string {
 					if function.Static {
 						return function.Fullname
 					}
-					return fmt.Sprintf("static_cast<%v*>(ptr)->%v", function.Class(), function.Name)
+					return fmt.Sprintf("static_cast<%v*>(ptr)->%v", func() string {
+						if c := parser.State.ClassMap[function.ClassName()]; c != nil && c.Fullname != "" {
+							return c.Fullname
+						}
+						return function.ClassName()
+					}(), function.Name)
 				}()))
 		}
 
@@ -342,14 +559,19 @@ func cppFunctionBody(function *parser.Function) string {
 		{
 			var function = *function
 			function.Name = function.TmpName
-			function.Fullname = fmt.Sprintf("%v::%v", function.Class(), function.Name)
+			function.Fullname = fmt.Sprintf("%v::%v", function.ClassName(), function.Name)
 
 			return fmt.Sprintf("\t%v = %v;", converter.CppOutputParameters(&function,
 				func() string {
 					if function.Static {
 						return function.Fullname
 					}
-					return fmt.Sprintf("static_cast<%v*>(ptr)->%v", function.Class(), function.Name)
+					return fmt.Sprintf("static_cast<%v*>(ptr)->%v", func() string {
+						if c := parser.State.ClassMap[function.ClassName()]; c != nil && c.Fullname != "" {
+							return c.Fullname
+						}
+						return function.ClassName()
+					}(), function.Name)
 				}()),
 
 				converter.CppInputParameters(&function),
@@ -358,19 +580,31 @@ func cppFunctionBody(function *parser.Function) string {
 
 	case parser.SIGNAL:
 		{
+			var bb = new(bytes.Buffer)
+			defer bb.Reset()
+
+			if function.SignalMode == parser.CONNECT {
+				if reg := converter.CppRegisterMetaType(function); reg != "" {
+					bb.WriteString(reg + "\n")
+				}
+			}
+
 			var my string
-			if parser.ClassMap[function.Class()].Module != parser.MOC {
+			var c, _ = function.Class()
+			if c.Module != parser.MOC {
 				my = "My"
 			}
 			if converter.IsPrivateSignal(function) {
-				return fmt.Sprintf("\tQObject::%v(static_cast<%v*>(ptr), &%v::%v, static_cast<%v%v*>(ptr), static_cast<%v (%v%v::*)(%v)>(&%v%v::Signal_%v%v));", strings.ToLower(function.SignalMode), function.Class(), function.Class(), function.Name, my, function.Class(), function.Output, my, function.Class(), converter.CppInputParametersForSignalConnect(function), my, function.Class(), strings.Title(function.Name), function.OverloadNumber)
+				fmt.Fprintf(bb, "\tQObject::%v(static_cast<%v*>(ptr), &%v::%v, static_cast<%v%v*>(ptr), static_cast<%v (%v%v::*)(%v)>(&%v%v::Signal_%v%v));", strings.ToLower(function.SignalMode), function.ClassName(), function.ClassName(), function.Name, my, function.ClassName(), function.Output, my, function.ClassName(), converter.CppInputParametersForSignalConnect(function), my, function.ClassName(), strings.Title(function.Name), function.OverloadNumber)
+			} else {
+				fmt.Fprintf(bb, "\tQObject::%v(static_cast<%v*>(ptr), static_cast<%v (%v::*)(%v)>(&%v::%v), static_cast<%v%v*>(ptr), static_cast<%v (%v%v::*)(%v)>(&%v%v::Signal_%v%v));",
+					strings.ToLower(function.SignalMode),
+
+					function.ClassName(), function.Output, function.ClassName(), converter.CppInputParametersForSignalConnect(function), function.ClassName(), function.Name,
+
+					my, function.ClassName(), function.Output, my, function.ClassName(), converter.CppInputParametersForSignalConnect(function), my, function.ClassName(), strings.Title(function.Name), function.OverloadNumber)
 			}
-			return fmt.Sprintf("\tQObject::%v(static_cast<%v*>(ptr), static_cast<%v (%v::*)(%v)>(&%v::%v), static_cast<%v%v*>(ptr), static_cast<%v (%v%v::*)(%v)>(&%v%v::Signal_%v%v));",
-				strings.ToLower(function.SignalMode),
-
-				function.Class(), function.Output, function.Class(), converter.CppInputParametersForSignalConnect(function), function.Class(), function.Name,
-
-				my, function.Class(), function.Output, my, function.Class(), converter.CppInputParametersForSignalConnect(function), my, function.Class(), strings.Title(function.Name), function.OverloadNumber)
+			return bb.String()
 		}
 	}
 

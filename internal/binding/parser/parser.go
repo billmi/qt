@@ -3,63 +3,92 @@ package parser
 import (
 	"encoding/xml"
 	"fmt"
-	"runtime"
+	"path/filepath"
+	"strings"
+	"sync"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/therecipe/qt/internal/utils"
 )
 
-const (
-	SIGNAL = "signal"
-	SLOT   = "slot"
+var State = &struct {
+	ClassMap map[string]*Class
 
-	IMPURE = "impure"
-	PURE   = "pure"
+	MocImports map[string]struct{}
+	Minimal    bool //TODO:
+	Target     string
+}{
+	ClassMap:   make(map[string]*Class),
+	MocImports: make(map[string]struct{}),
+}
 
-	MOC              = "main"
-	PLAIN            = "plain"
-	CONSTRUCTOR      = "constructor"
-	COPY_CONSTRUCTOR = "copy-constructor"
-	MOVE_CONSTRUCTOR = "move-constructor"
-	DESTRUCTOR       = "destructor"
+func LoadModules() {
+	libs := GetLibs()
+	modules := make([]*Module, len(libs))
+	modulesMutex := new(sync.Mutex)
+	wg := new(sync.WaitGroup)
 
-	CONNECT    = "Connect"
-	DISCONNECT = "Disconnect"
-	CALLBACK   = "callback"
+	wg.Add(len(GetLibs()))
+	for i, m := range libs {
+		go func(i int, m string) {
+			mod := LoadModule(m)
 
-	GETTER = "getter"
-	SETTER = "setter"
-
-	VOID = "void"
-)
-
-var (
-	ClassMap        = make(map[string]*Class)
-	SubnamespaceMap = make(map[string]bool)
-)
-
-func GetModule(s string) *Module {
-
-	if s == "sailfish" {
-		var m = sailfishModule()
-		m.Prepare()
-		return m
+			modulesMutex.Lock()
+			modules[i] = mod
+			modulesMutex.Unlock()
+			wg.Done()
+		}(i, m)
 	}
+	wg.Wait()
 
-	var m = new(Module)
-
-	switch runtime.GOOS {
-	case "darwin", "linux":
-		{
-			xml.Unmarshal([]byte(utils.Load(fmt.Sprintf("/usr/local/Qt5.7.0/Docs/Qt-5.7/qt%v/qt%v.index", s, s))), &m)
-		}
-
-	case "windows":
-		{
-			xml.Unmarshal([]byte(utils.Load(fmt.Sprintf("C:\\Qt\\Qt5.7.0\\Docs\\Qt-5.7\\qt%v\\qt%v.index", s, s))), &m)
+	for _, m := range modules {
+		if m != nil {
+			m.Prepare()
 		}
 	}
+}
 
-	m.Prepare()
+func LoadModule(m string) *Module {
+	var (
+		logName   = "parser.LoadModule"
+		logFields = logrus.Fields{"module": m}
+	)
+	utils.Log.WithFields(logFields).Debug(logName)
 
-	return m
+	if m == "Sailfish" {
+		return sailfishModule()
+	}
+
+	module := new(Module)
+	var err error
+	switch {
+	case utils.QT_WEBKIT() && m == "WebKit":
+		if utils.QT_HOMEBREW() {
+			err = xml.Unmarshal([]byte(utils.LoadOptional(filepath.Join(utils.MustGoPath(), "src", "github.com", "therecipe", "qt", "internal", "binding", "files", "docs", "5.7.1", fmt.Sprintf("qt%v.index", strings.ToLower(m))))), &module)
+		} else {
+			err = xml.Unmarshal([]byte(utils.LoadOptional(filepath.Join(utils.MustGoPath(), "src", "github.com", "therecipe", "qt", "internal", "binding", "files", "docs", "5.8.0", fmt.Sprintf("qt%v.index", strings.ToLower(m))))), &module)
+		}
+
+	case utils.QT_MXE(), utils.QT_MSYS2() && utils.QT_MSYS2_STATIC():
+		err = xml.Unmarshal([]byte(utils.LoadOptional(filepath.Join(utils.MustGoPath(), "src", "github.com", "therecipe", "qt", "internal", "binding", "files", "docs", "5.8.0", fmt.Sprintf("qt%v.index", strings.ToLower(m))))), &module)
+
+	case utils.QT_HOMEBREW(), utils.QT_MSYS2():
+		err = xml.Unmarshal([]byte(utils.LoadOptional(filepath.Join(utils.MustGoPath(), "src", "github.com", "therecipe", "qt", "internal", "binding", "files", "docs", "5.9.0", fmt.Sprintf("qt%v.index", strings.ToLower(m))))), &module)
+
+	case utils.QT_PKG_CONFIG():
+		err = xml.Unmarshal([]byte(utils.LoadOptional(filepath.Join(utils.QT_DOC_DIR(), fmt.Sprintf("qt%v", strings.ToLower(m)), fmt.Sprintf("qt%v.index", strings.ToLower(m))))), &module)
+
+	default:
+		err = xml.Unmarshal([]byte(utils.Load(filepath.Join(utils.QT_DIR(), "Docs", fmt.Sprintf("Qt-%v", utils.QT_VERSION_MAJOR()), fmt.Sprintf("qt%v", strings.ToLower(m)), fmt.Sprintf("qt%v.index", strings.ToLower(m))))), &module)
+	}
+	if err != nil {
+		if m != "DataVisualization" && m != "Charts" {
+			utils.Log.WithFields(logFields).WithError(err).Warn(logName)
+		} else {
+			utils.Log.WithFields(logFields).WithError(err).Debug(logName)
+		}
+		return nil
+	}
+
+	return module
 }
